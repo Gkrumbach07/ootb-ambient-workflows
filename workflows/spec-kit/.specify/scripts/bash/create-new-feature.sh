@@ -84,7 +84,7 @@ fi
 
 cd "$REPO_ROOT"
 
-SPECS_DIR="$REPO_ROOT/specs"
+SPECS_DIR="$REPO_ROOT/_artifacts/specs"
 mkdir -p "$SPECS_DIR"
 
 # Feature numbering is now optional

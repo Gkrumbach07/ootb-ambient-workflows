@@ -82,14 +82,14 @@ check_feature_branch() {
     return 0
 }
 
-get_feature_dir() { echo "$1/specs/$2"; }
+get_feature_dir() { echo "$1/_artifacts/specs/$2"; }
 
 # Find feature directory - supports both exact match and numeric prefix (backward compatibility)
 # Priority: 1) Exact match, 2) Numeric prefix match (legacy), 3) Return expected path
 find_feature_dir_by_prefix() {
     local repo_root="$1"
     local branch_name="$2"
-    local specs_dir="$repo_root/specs"
+    local specs_dir="$repo_root/_artifacts/specs"
 
     # First: Try exact match (most common case, fastest)
     if [[ -d "$specs_dir/$branch_name" ]]; then
