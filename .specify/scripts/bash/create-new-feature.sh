@@ -4,39 +4,54 @@ set -e
 
 JSON_MODE=false
 SHORT_NAME=""
+BRANCH_NUMBER=""
 ARGS=()
-i=0
-while [ $i -lt $# ]; do
+i=1
+while [ $i -le $# ]; do
     arg="${!i}"
     case "$arg" in
         --json) 
             JSON_MODE=true 
             ;;
         --short-name)
-            if [ $((i + 1)) -ge $# ]; then
+            if [ $((i + 1)) -gt $# ]; then
                 echo 'Error: --short-name requires a value' >&2
                 exit 1
             fi
             i=$((i + 1))
-            SHORT_NAME="${!i}"
+            next_arg="${!i}"
+            # Check if the next argument is another option (starts with --)
+            if [[ "$next_arg" == --* ]]; then
+                echo 'Error: --short-name requires a value' >&2
+                exit 1
+            fi
+            SHORT_NAME="$next_arg"
+            ;;
+        --number)
+            if [ $((i + 1)) -gt $# ]; then
+                echo 'Error: --number requires a value' >&2
+                exit 1
+            fi
+            i=$((i + 1))
+            next_arg="${!i}"
+            if [[ "$next_arg" == --* ]]; then
+                echo 'Error: --number requires a value' >&2
+                exit 1
+            fi
+            BRANCH_NUMBER="$next_arg"
             ;;
         --help|-h) 
-            echo "Usage: $0 [--json] [--short-name <name>] <feature_description>"
+            echo "Usage: $0 [--json] [--short-name <name>] [--number N] <feature_description>"
             echo ""
             echo "Options:"
             echo "  --json              Output in JSON format"
-            echo "  --short-name <name> Provide a custom branch name (descriptive, kebab-case)"
+            echo "  --short-name <name> Provide a custom short name (2-4 words) for the branch"
+            echo "  --number N          Specify branch number manually (overrides auto-detection)"
             echo "  --help, -h          Show this help message"
-            echo ""
-            echo "Branch naming:"
-            echo "  - Any descriptive name works: user-auth, payment-fix, oauth-integration"
-            echo "  - Numbers are optional: 001-user-auth or just user-auth"
-            echo "  - Branch name becomes the specs/ folder name"
             echo ""
             echo "Examples:"
             echo "  $0 'Add user authentication system' --short-name 'user-auth'"
-            echo "  $0 'Implement OAuth2 integration for API'"
-            echo "  $0 --short-name '001-payment-fix' 'Fix payment processing bug'"
+            echo "  $0 'Implement OAuth2 integration for API' --number 5"
             exit 0
             ;;
         *) 
@@ -48,7 +63,7 @@ done
 
 FEATURE_DESCRIPTION="${ARGS[*]}"
 if [ -z "$FEATURE_DESCRIPTION" ]; then
-    echo "Usage: $0 [--json] [--short-name <name>] <feature_description>" >&2
+    echo "Usage: $0 [--json] [--short-name <name>] [--number N] <feature_description>" >&2
     exit 1
 fi
 
@@ -63,6 +78,37 @@ find_repo_root() {
         dir="$(dirname "$dir")"
     done
     return 1
+}
+
+# Function to check existing branches (local and remote) and return next available number
+check_existing_branches() {
+    local short_name="$1"
+    
+    # Fetch all remotes to get latest branch info (suppress errors if no remotes)
+    git fetch --all --prune 2>/dev/null || true
+    
+    # Find all branches matching the pattern using git ls-remote (more reliable)
+    local remote_branches=$(git ls-remote --heads origin 2>/dev/null | grep -E "refs/heads/[0-9]+-${short_name}$" | sed 's/.*\/\([0-9]*\)-.*/\1/' | sort -n)
+    
+    # Also check local branches
+    local local_branches=$(git branch 2>/dev/null | grep -E "^[* ]*[0-9]+-${short_name}$" | sed 's/^[* ]*//' | sed 's/-.*//' | sort -n)
+    
+    # Check specs directory as well
+    local spec_dirs=""
+    if [ -d "$SPECS_DIR" ]; then
+        spec_dirs=$(find "$SPECS_DIR" -maxdepth 1 -type d -name "[0-9]*-${short_name}" 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/-.*//' | sort -n)
+    fi
+    
+    # Combine all sources and get the highest number
+    local max_num=0
+    for num in $remote_branches $local_branches $spec_dirs; do
+        if [ "$num" -gt "$max_num" ]; then
+            max_num=$num
+        fi
+    done
+    
+    # Return next number
+    echo $((max_num + 1))
 }
 
 # Resolve repository root. Prefer git information when available, but fall back
@@ -84,12 +130,8 @@ fi
 
 cd "$REPO_ROOT"
 
-SPECS_DIR="$REPO_ROOT/../../artifacts/specs"
+SPECS_DIR="$REPO_ROOT/specs"
 mkdir -p "$SPECS_DIR"
-
-# Feature numbering is now optional
-# If user wants numbers, they can include them in the short-name (e.g., --short-name "001-user-auth")
-FEATURE_NUM=""
 
 # Function to generate branch name with stop word filtering and length filtering
 generate_branch_name() {
@@ -111,12 +153,9 @@ generate_branch_name() {
         if ! echo "$word" | grep -qiE "$stop_words"; then
             if [ ${#word} -ge 3 ]; then
                 meaningful_words+=("$word")
-            else
+            elif echo "$description" | grep -q "\b${word^^}\b"; then
                 # Keep short words if they appear as uppercase in original (likely acronyms)
-                local word_upper=$(echo "$word" | tr '[:lower:]' '[:upper:]')
-                if echo "$description" | grep -q "\b${word_upper}\b"; then
-                    meaningful_words+=("$word")
-                fi
+                meaningful_words+=("$word")
             fi
         fi
     done
@@ -144,78 +183,78 @@ generate_branch_name() {
 # Generate branch name
 if [ -n "$SHORT_NAME" ]; then
     # Use provided short name, just clean it up
-    BRANCH_NAME=$(echo "$SHORT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//' | sed 's/-$//')
+    BRANCH_SUFFIX=$(echo "$SHORT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//' | sed 's/-$//')
 else
     # Generate from description with smart filtering
-    BRANCH_NAME=$(generate_branch_name "$FEATURE_DESCRIPTION")
+    BRANCH_SUFFIX=$(generate_branch_name "$FEATURE_DESCRIPTION")
 fi
+
+# Determine branch number
+if [ -z "$BRANCH_NUMBER" ]; then
+    if [ "$HAS_GIT" = true ]; then
+        # Check existing branches on remotes
+        BRANCH_NUMBER=$(check_existing_branches "$BRANCH_SUFFIX")
+    else
+        # Fall back to local directory check
+        HIGHEST=0
+        if [ -d "$SPECS_DIR" ]; then
+            for dir in "$SPECS_DIR"/*; do
+                [ -d "$dir" ] || continue
+                dirname=$(basename "$dir")
+                number=$(echo "$dirname" | grep -o '^[0-9]\+' || echo "0")
+                number=$((10#$number))
+                if [ "$number" -gt "$HIGHEST" ]; then HIGHEST=$number; fi
+            done
+        fi
+        BRANCH_NUMBER=$((HIGHEST + 1))
+    fi
+fi
+
+FEATURE_NUM=$(printf "%03d" "$BRANCH_NUMBER")
+BRANCH_NAME="${FEATURE_NUM}-${BRANCH_SUFFIX}"
 
 # GitHub enforces a 244-byte limit on branch names
 # Validate and truncate if necessary
 MAX_BRANCH_LENGTH=244
 if [ ${#BRANCH_NAME} -gt $MAX_BRANCH_LENGTH ]; then
-    # Truncate at word boundary if possible
-    TRUNCATED_NAME=$(echo "$BRANCH_NAME" | cut -c1-$MAX_BRANCH_LENGTH)
+    # Calculate how much we need to trim from suffix
+    # Account for: feature number (3) + hyphen (1) = 4 chars
+    MAX_SUFFIX_LENGTH=$((MAX_BRANCH_LENGTH - 4))
+    
+    # Truncate suffix at word boundary if possible
+    TRUNCATED_SUFFIX=$(echo "$BRANCH_SUFFIX" | cut -c1-$MAX_SUFFIX_LENGTH)
     # Remove trailing hyphen if truncation created one
-    TRUNCATED_NAME=$(echo "$TRUNCATED_NAME" | sed 's/-$//')
+    TRUNCATED_SUFFIX=$(echo "$TRUNCATED_SUFFIX" | sed 's/-$//')
     
     ORIGINAL_BRANCH_NAME="$BRANCH_NAME"
-    BRANCH_NAME="$TRUNCATED_NAME"
+    BRANCH_NAME="${FEATURE_NUM}-${TRUNCATED_SUFFIX}"
     
     >&2 echo "[specify] Warning: Branch name exceeded GitHub's 244-byte limit"
     >&2 echo "[specify] Original: $ORIGINAL_BRANCH_NAME (${#ORIGINAL_BRANCH_NAME} bytes)"
     >&2 echo "[specify] Truncated to: $BRANCH_NAME (${#BRANCH_NAME} bytes)"
 fi
 
-# Check if we're already on a feature branch with existing folder
-CURRENT_BRANCH=""
 if [ "$HAS_GIT" = true ]; then
-    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    git checkout -b "$BRANCH_NAME"
+else
+    >&2 echo "[specify] Warning: Git repository not detected; skipped branch creation for $BRANCH_NAME"
 fi
 
-# Check if a folder already exists for the current branch
-if [ -n "$CURRENT_BRANCH" ] && [ -d "$SPECS_DIR/$CURRENT_BRANCH" ]; then
-    # Use existing branch and folder
-    BRANCH_NAME="$CURRENT_BRANCH"
-    FEATURE_DIR="$SPECS_DIR/$CURRENT_BRANCH"
-    >&2 echo "[specify] Using existing branch: $CURRENT_BRANCH"
-    >&2 echo "[specify] Using existing feature directory: $FEATURE_DIR"
-elif [ -n "$CURRENT_BRANCH" ] && [ "$CURRENT_BRANCH" != "main" ] && [ "$CURRENT_BRANCH" != "master" ] && [ "$CURRENT_BRANCH" != "develop" ]; then
-    # Already on a feature branch, just create the folder
-    BRANCH_NAME="$CURRENT_BRANCH"
-    FEATURE_DIR="$SPECS_DIR/$CURRENT_BRANCH"
-    mkdir -p "$FEATURE_DIR"
-    >&2 echo "[specify] Using existing branch: $CURRENT_BRANCH"
-    >&2 echo "[specify] Created feature directory: $FEATURE_DIR"
-else
-    # Create new branch and folder
-    if [ "$HAS_GIT" = true ]; then
-        git checkout -b "$BRANCH_NAME"
-        >&2 echo "[specify] Created new branch: $BRANCH_NAME"
-    else
-        >&2 echo "[specify] Warning: Git repository not detected; skipped branch creation for $BRANCH_NAME"
-    fi
-    FEATURE_DIR="$SPECS_DIR/$BRANCH_NAME"
-    mkdir -p "$FEATURE_DIR"
-    >&2 echo "[specify] Created feature directory: $FEATURE_DIR"
-fi
+FEATURE_DIR="$SPECS_DIR/$BRANCH_NAME"
+mkdir -p "$FEATURE_DIR"
 
 TEMPLATE="$REPO_ROOT/.specify/templates/spec-template.md"
 SPEC_FILE="$FEATURE_DIR/spec.md"
-if [ ! -f "$SPEC_FILE" ]; then
-    if [ -f "$TEMPLATE" ]; then cp "$TEMPLATE" "$SPEC_FILE"; else touch "$SPEC_FILE"; fi
-    >&2 echo "[specify] Created spec file: $SPEC_FILE"
-else
-    >&2 echo "[specify] Using existing spec file: $SPEC_FILE"
-fi
+if [ -f "$TEMPLATE" ]; then cp "$TEMPLATE" "$SPEC_FILE"; else touch "$SPEC_FILE"; fi
 
 # Set the SPECIFY_FEATURE environment variable for the current session
 export SPECIFY_FEATURE="$BRANCH_NAME"
 
 if $JSON_MODE; then
-    printf '{"BRANCH_NAME":"%s","SPEC_FILE":"%s"}\n' "$BRANCH_NAME" "$SPEC_FILE"
+    printf '{"BRANCH_NAME":"%s","SPEC_FILE":"%s","FEATURE_NUM":"%s"}\n' "$BRANCH_NAME" "$SPEC_FILE" "$FEATURE_NUM"
 else
     echo "BRANCH_NAME: $BRANCH_NAME"
     echo "SPEC_FILE: $SPEC_FILE"
+    echo "FEATURE_NUM: $FEATURE_NUM"
     echo "SPECIFY_FEATURE environment variable set to: $BRANCH_NAME"
 fi
